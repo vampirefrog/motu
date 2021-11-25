@@ -16,7 +16,9 @@ sudo apt-get install linux-headers-`uname -r`
 
 ```bash
 make -C /lib/modules/`uname -r`/build M=$PWD
-make -C /lib/modules/`uname -r`/build M=$PWD modules_install
+sudo make -C /lib/modules/`uname -r`/build M=$PWD modules_install
+sudo depmod
+sudo modprobe motu
 ```
 
 Protocol:
