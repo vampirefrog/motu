@@ -46,7 +46,7 @@ so the next byte after it is another mask byte.
 MIDI events with the same command (for example 93 for KEY ON on channel 4)
 skip the command byte from the second event onward.
 For example, if the original data is:
-93 10 7f 93 20 7f 93 10 00 93 20 00 fe
+```93 10 7f 93 20 7f 93 10 00 93 20 00 fe```
 The bytes that will be sent to the host will be:
-93 10 7f 20 7f 10 00 20 00 fe
+```93 10 7f 20 7f 10 00 20 00 fe```
 Thus, the driver must know the number of bytes that a MIDI event takes.
