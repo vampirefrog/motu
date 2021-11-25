@@ -3,6 +3,8 @@ MOTU midi express 128 linux driver
 
 Only tested on linux 5.x, and with midi express 128, the 5 port version might work too.
 
+Currently in alpha stage, please submit pull requests or bug reports if you find any.
+
 Build:
 ------
 
