@@ -1,0 +1,9 @@
+*.cmd
+Module.symvers
+modules.order
+*-test.c
+*.sublime-project
+*.o
+*.ko
+*.mod
+*.mod.c
