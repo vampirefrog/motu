@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Behringer MOTU driver
+ *   MOTU midi express 128 driver
+ *   Code based on the Behringer BCD2000 driver
  *
  *   Copyright (C) 2014 vampirefrog (motu-usb@vampi.tech)
  */
