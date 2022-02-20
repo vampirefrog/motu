@@ -1,6 +1,8 @@
 MOTU midi express 128 linux driver
 ==================================
 
+**WARNING** there is currently a kernel panic in the driver, I haven't figured out how to fix it yet, so I suggest running it in a VM for now.
+
 Only tested on linux 5.x, and with midi express 128, the 5 port version might work too.
 
 Currently in alpha stage, please submit pull requests or bug reports if you find any.
