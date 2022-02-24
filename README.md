@@ -10,7 +10,7 @@ MOTU midi express 128 linux driver
 | MIDI Express XT  | 8+8   | Untested, probably not working |
 | micro express    | 5+5   | Untested, probably not working |
 
-There is no GUI interface like ClockWorks.
+There is currently no replacement for ClockWorks either.
 
 Only tested on linux 5.x.
 
