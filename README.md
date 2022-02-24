@@ -3,7 +3,16 @@ MOTU midi express 128 linux driver
 
 **WARNING** there is currently a kernel panic in the driver, I haven't figured out how to fix it yet, so I suggest running it in a VM for now.
 
-Only tested on linux 5.x, and with midi express 128, the 5 port version might work too.
+| Device           | Ports | Status                         |
+|------------------|-------|--------------------------------|
+| midi express 128 | 8+8   | Working, with kernel panic     |
+| micro lite       | 5+5   | Untested, possibly working     |
+| MIDI Express XT  | 8+8   | Untested, probably not working |
+| micro express    | 5+5   | Untested, probably not working |
+
+There is no GUI interface like ClockWorks.
+
+Only tested on linux 5.x.
 
 Currently in alpha stage, please submit pull requests or bug reports if you find any.
 
@@ -15,6 +24,8 @@ Make sure you have linux headers or linux source.
 ```bash
 sudo apt-get install linux-headers-`uname -r`
 ```
+
+Build and install.
 
 ```bash
 make -C /lib/modules/`uname -r`/build M=$PWD
