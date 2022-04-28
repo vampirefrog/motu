@@ -26,7 +26,7 @@
 
 typedef enum
 {
-        express_128,micro_express,micro_lite
+        express_128,micro_express,micro_lite,express_xt
 } en_motu_devices;
 
 static const struct usb_device_id id_table[] = {
@@ -55,8 +55,8 @@ struct motu {
 
 	int midi_out_active;
 	struct snd_rawmidi *rmidi;
-	struct motu_in_port in_ports[8];
-	struct motu_out_port out_ports[8];
+	struct motu_in_port in_ports[9];
+	struct motu_out_port out_ports[9];
 	unsigned char counter;
 
 	unsigned char midi_in_buf[BUFSIZE];
@@ -525,6 +525,7 @@ static void motu_midi_output_trigger(struct snd_rawmidi_substream *substream,
 			 motu_midi_send_prot1(motu);
 			 break;
 		      case micro_express :
+		      case express_xt :
 		         motu_midi_send_prot2(motu);
 		         break;
 	           }
@@ -555,6 +556,7 @@ static void motu_output_complete(struct urb *urb)
 	      motu_midi_send_prot1(motu);
 	      break;
 	   case micro_express :
+	   case express_xt :
 	      motu_midi_send_prot2(motu);
 	      break;
 	}
@@ -580,6 +582,7 @@ static void motu_input_complete(struct urb *urb)
   		  motu_midi_handle_input_prot1(motu, urb->transfer_buffer, urb->actual_length);
   		  break;
 	       case micro_express :
+	       case express_xt :
 	          motu_midi_handle_input_prot2(motu, urb->transfer_buffer, urb->actual_length);
 	          break;
             }
@@ -665,6 +668,7 @@ static int motu_init_midi(struct motu *motu)
 	      motu->midi_out_urb = usb_alloc_urb(0, GFP_KERNEL);
 	      break;
            case micro_express :
+           case express_xt :
               motu->midi_out_urb = usb_alloc_urb(1, GFP_KERNEL);
               break;
         }
@@ -686,7 +690,7 @@ static int motu_init_midi(struct motu *motu)
 				motu->midi_out_buf, BUFSIZE,
 				motu_output_complete, motu, 1);
 	}
-	else if(motu->motu_type == micro_express)
+	else if((motu->motu_type == micro_express) || (motu->motu_type == express_xt))
 	{
            motu->midi_out_urb->dev = motu->dev;
            motu->midi_out_urb->pipe = usb_sndisocpipe(motu->dev,0x02);
@@ -784,14 +788,14 @@ static int motu_probe(struct usb_interface *interface,
 	switch(usbdev->descriptor.bDeviceSubClass)
 	{
 	   case 1 : // micro express
+	      if(usbdev->actconfig->desc.bConfigurationValue != 1)
+	      {
+   	         usb_driver_set_configuration(usbdev,1);
+   	         return -ENODEV;
+	      }
+	      usb_set_interface(usbdev,0,0);
 	      if(strstr(str,"Micro Express"))
 	      {
-	         if(usbdev->actconfig->desc.bConfigurationValue != 1)
-	         {
-   	            usb_driver_set_configuration(usbdev,1);
-   	            return -ENODEV;
-	         }
-	         usb_set_interface(usbdev,0,0);
 	         motu->motu_type = micro_express;
 	         motu->n_ports_in = 5; // 0 is dead for the moment
 	         motu->n_ports_out = 7; // 0 is all
@@ -801,8 +805,12 @@ static int motu_probe(struct usb_interface *interface,
 	      }
 	      else
 	      {
-                 mutex_unlock(&devices_mutex);
-                 return -ENODEV;
+	         motu->motu_type = express_xt;
+	         motu->n_ports_in = 9; // 0 is dead for the moment
+	         motu->n_ports_out = 9; // 0 is all
+	         motu->last_out_port = -1;
+	         motu->last_in_port = -1;
+	         motu->in_state = 0;
 	      }
 	      break;
 	   case 3 : // express 128
@@ -826,7 +834,7 @@ static int motu_probe(struct usb_interface *interface,
 	}
 	
 	// Do I need to initialize this to zero? Or is it already zeroed by snd_card_new()?
-	for(i = 0; i < 8; i++) {
+	for(i = 0; i < 9; i++) {
 		motu->in_ports[i].substream = 0;
 		motu->in_ports[i].last_cmd = 0;
 		motu->in_ports[i].cmd_bytes_remaining = 0;
@@ -886,6 +894,7 @@ static void motu_disconnect(struct usb_interface *interface)
 
 static int motu_ioctl(struct usb_interface *intf,unsigned int code,void *buf)
 {
+        return(0);
 } /* motu_ioctl */
 
 static struct usb_driver motu_driver = {
