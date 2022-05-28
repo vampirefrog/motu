@@ -17,12 +17,14 @@
 #include <linux/usb.h>
 #include <linux/usb/audio.h>
 #include <linux/version.h>
+#include <linux/spinlock.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
 
 #define PREFIX   "snd-motu: "
-#define BUFSIZE  32
+#define BUFSIZE  128
+#define NUM_ISO  4
 
 typedef enum
 {
@@ -45,6 +47,20 @@ struct motu_in_port {
 
 struct motu_out_port {
 	struct snd_rawmidi_substream *substream;
+};
+
+#define N_MBUF       64
+struct motufifo 
+{
+    unsigned char  mbuf[N_MBUF];
+    unsigned int   p_in,p_out;
+    unsigned char  last_cmd;
+    unsigned int   rd_bytes;
+    unsigned int   missing_bytes;
+    unsigned int   buf_len;
+    unsigned int   buf_send_len;
+    unsigned int   cmd_len;
+    unsigned int   remaining;
 };
 
 struct motu {
@@ -73,6 +89,10 @@ struct motu {
 	int last_out_port;
 	int last_in_port;
 	int in_state;
+	
+	struct motufifo mfifo[9];
+	
+	spinlock_t spinlock;
 };
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
@@ -412,15 +432,59 @@ static void motu_midi_send_prot1(struct motu *motu)
 		motu->midi_out_active = 1;
 }
 
+static void mfifo_in(struct motu *motu,int port,unsigned char *buf,int len)
+{
+        int  i;
+        
+        for(i=0; i<len; i++)
+        {
+           motu->mfifo[port].mbuf[motu->mfifo[port].p_in] = buf[i];
+           motu->mfifo[port].p_in++;
+           if(motu->mfifo[port].p_in >= N_MBUF)
+              motu->mfifo[port].p_in = 0;
+
+           motu->mfifo[port].buf_len++;
+           if(buf[i] & 0x80) // command
+           {
+              switch(buf[i])
+              {
+                 case 0xF0 : // sysex command
+                    motu->mfifo[port].cmd_len = 0;
+                    break;
+                 case 0xF7 : // end sysex
+                    motu->mfifo[port].cmd_len = 0;
+                    motu->mfifo[port].buf_send_len = motu->mfifo[port].buf_len;
+                    break;
+                 default :
+                    motu->mfifo[port].cmd_len = get_cmd_num_bytes(buf[i]) - 1;
+                    motu->mfifo[port].remaining = motu->mfifo[port].cmd_len;
+                    break;
+	      }
+           }
+           else if(motu->mfifo[port].cmd_len)
+           {
+              if(motu->mfifo[port].remaining == 0)
+                 motu->mfifo[port].remaining = motu->mfifo[port].cmd_len;
+              motu->mfifo[port].remaining--;
+              if(motu->mfifo[port].remaining == 0)
+              {
+                 motu->mfifo[port].buf_send_len = motu->mfifo[port].buf_len;
+              }
+           }
+        }
+
+        return;
+        
+} /* mfifo_in */
+
 static void motu_midi_send_prot2(struct motu *motu)
 {
-	int ret, p, i,j;
+	int ret, p, i,j,k;
 	struct snd_rawmidi_substream *midi_out_substream;
-	int lens[8];
-	unsigned char bufs[8][3];
-
-	motu->midi_out_buf[0] = motu->counter++;
-	motu->midi_out_buf[1] = 0;
+	int lens[9];
+	unsigned char bufs[9][12];
+	uint8_t state;
+	int out_count, out_offset;
 
 	for(p = 0; p < motu->n_ports_out; p++) {
 		lens[p] = 0;
@@ -430,53 +494,101 @@ static void motu_midi_send_prot2(struct motu *motu)
 			continue;
 
 		lens[p] = snd_rawmidi_transmit(midi_out_substream, bufs[p], 3);
+		mfifo_in(motu,p,bufs[p],lens[p]);
 
 		if (lens[p] < 0)
 			dev_err(&motu->dev->dev, "%s: snd_rawmidi_transmit error %d\n", __func__, lens[p]);
 	}
 
         i = 0;
+        state = 0;
+        k = 0;
         for(p=0; p<motu->n_ports_out; p++)
         {
-           if(lens[p])
+           while(motu->mfifo[p].buf_send_len)
            {
               if(p != motu->last_out_port)
               {
-                 motu->midi_out_buf[i++] = 0xF5;
-                 motu->midi_out_buf[i++] = p;
-                 motu->last_out_port = p;
-              }
-              j = 0;
-              while(lens[p])
-              {
-                 motu->midi_out_buf[i++] = bufs[p][j++];
-                 lens[p]--;
-              }
-           }   
-            
-           if(i)
-           { 
-              while(i < 14)
-              {
-                 switch(i)
+                 if(k < 10) // dont split channel-change
                  {
-                    case 12 : motu->midi_out_buf[i] = 1; break; //motu->counter; break;
-                    case 13 : motu->midi_out_buf[i] = 0; break;
-                    default : motu->midi_out_buf[i] = 0xFF; break;
+                    motu->midi_out_buf[i++] = 0xF5;
+                    motu->midi_out_buf[i++] = p;
+                    k += 2;
+                    motu->last_out_port = p;
+                    if((motu->mfifo[p].mbuf[motu->mfifo[p].p_out] & 0x80) == 0)
+                    {
+                       motu->midi_out_buf[i++] = motu->mfifo[p].last_cmd;
+                       k++;
+                    }
                  }
-                 i++;
+                 else
+                 {
+                    while(k < 12)
+                    {
+                       motu->midi_out_buf[i++] = 0xFF;
+                       k++;
+                    }
+                 }
+              }
+              else
+              {
+                 if(motu->mfifo[p].mbuf[motu->mfifo[p].p_out] & 0x80)
+                    motu->mfifo[p].last_cmd = motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
+                 motu->midi_out_buf[i++] = 
+                     motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
+                 motu->mfifo[p].p_out++;
+                 if(motu->mfifo[p].p_out >= N_MBUF)
+                    motu->mfifo[p].p_out = 0;
+                 motu->mfifo[p].buf_len--;
+                 motu->mfifo[p].buf_send_len--;
+                 k++;
+              }
+              if(k == 12)
+              {
+                 motu->midi_out_buf[i++] = 1;
+                 motu->midi_out_buf[i++] = 0;
+                 k = 0;
               }
            }
-        }                  
+        }
         
+        j = 0;
         if(i)
         {
-           motu->midi_out_urb->number_of_packets = 1;
-           motu->midi_out_urb->iso_frame_desc[0].offset = 0;
-           motu->midi_out_urb->iso_frame_desc[0].length = i;
-           motu->midi_out_urb->iso_frame_desc[0].status = 0;
-
-	   motu_dump_buffer(PREFIX "sending to device: ", motu->midi_out_buf, i);
+           if(k)
+           {
+              // fill rest
+              while(k < 12)
+              {
+                 motu->midi_out_buf[i++] = 0xFF;
+                 k++;
+	      }
+              motu->midi_out_buf[i++] = 1;
+              motu->midi_out_buf[i++] = 0;
+           }
+                         
+           out_count = i;
+           out_offset = 0;
+           k = 0;
+           while(out_count > 0)
+           {
+              if(out_count > 14)
+                 j = 14;
+	      else
+	         j = out_count;
+              if(k < NUM_ISO)
+              {
+                 motu->midi_out_urb->iso_frame_desc[k].offset = out_offset;
+	         motu->midi_out_urb->iso_frame_desc[k].length = j;
+                 motu->midi_out_urb->iso_frame_desc[k].status = 0;
+                 k++;
+              }
+              out_offset += j;
+              out_count -= j;                 
+           }
+           motu->midi_out_urb->number_of_packets = k;
+           
+	   motu_dump_buffer(PREFIX "sending to device    : ", motu->midi_out_buf, i);
 
            /* send packet to the MOTU */
 	   ret = usb_submit_urb(motu->midi_out_urb, GFP_ATOMIC);
@@ -485,7 +597,7 @@ static void motu_midi_send_prot2(struct motu *motu)
 			"%s (%p): usb_submit_urb() failed, ret=%d, outlen=%d\n",
 			__func__, midi_out_substream, ret, i);
 	   else
-		motu->midi_out_active = 1;
+		motu->midi_out_active = 1;		
         }
 
 } /* motu_midi_send_prot2 */
@@ -511,7 +623,18 @@ static int motu_midi_output_close(struct snd_rawmidi_substream *substream)
 static void motu_midi_output_trigger(struct snd_rawmidi_substream *substream,
 						int up)
 {
-	struct motu *motu = substream->rmidi->private_data;
+	struct motu *motu;
+	unsigned long flags;
+	
+	if(substream == NULL)
+	   return;
+	if(substream->rmidi == NULL)
+	   return;
+	if(substream->rmidi->private_data == NULL)
+	   return;
+	   
+	motu = substream->rmidi->private_data;
+        spin_lock_irqsave(&motu->spinlock,flags);
 
 	if (up) {
 		motu->out_ports[substream->number].substream = substream;
@@ -533,13 +656,13 @@ static void motu_midi_output_trigger(struct snd_rawmidi_substream *substream,
 	} else {
 		motu->out_ports[substream->number].substream = NULL;
 	}
+	spin_unlock_irqrestore(&motu->spinlock,flags);
 }
 
 static void motu_output_complete(struct urb *urb)
 {
-	struct motu *motu = urb->context;
-
-	motu->midi_out_active = 0;
+	struct motu *motu;
+	unsigned long flags;
 
 	if (urb->status)
 		dev_warn(&urb->dev->dev,
@@ -547,6 +670,10 @@ static void motu_output_complete(struct urb *urb)
 
 	if (urb->status == -ESHUTDOWN)
 		return;
+		
+        motu = urb->context;
+        spin_lock_irqsave(&motu->spinlock,flags);
+	motu->midi_out_active = 0;
 
 	/* check if there is more data userspace wants to send */
 	switch(motu->motu_type)
@@ -560,6 +687,8 @@ static void motu_output_complete(struct urb *urb)
 	      motu_midi_send_prot2(motu);
 	      break;
 	}
+
+	spin_unlock_irqrestore(&motu->spinlock,flags);
 }
 
 static void motu_input_complete(struct urb *urb)
@@ -669,7 +798,7 @@ static int motu_init_midi(struct motu *motu)
 	      break;
            case micro_express :
            case express_xt :
-              motu->midi_out_urb = usb_alloc_urb(1, GFP_KERNEL);
+              motu->midi_out_urb = usb_alloc_urb(NUM_ISO, GFP_KERNEL);
               break;
         }
 
@@ -832,6 +961,8 @@ static int motu_probe(struct usb_interface *interface,
 	      return -ENODEV;
 	      break;
 	}
+	
+	spin_lock_init(&motu->spinlock);
 	
 	// Do I need to initialize this to zero? Or is it already zeroed by snd_card_new()?
 	for(i = 0; i < 9; i++) {
