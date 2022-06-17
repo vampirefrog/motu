@@ -1,4 +1,4 @@
-MOTU midi express 128 linux driver
+MOTU midi linux driver
 ==================================
 
 | Device           | Ports | Status          |
@@ -63,3 +63,8 @@ For example, if the original data is:
 The bytes that will be sent to the host will be:
 ```93 10 7f 20 7f 10 00 20 00 fe```
 Thus, the driver must know the number of bytes that a MIDI event takes.
+
+Thanks:
+-------
+
+* lost-bit0 for micro lite, micro express and XT support, and fixing a kernel panic
