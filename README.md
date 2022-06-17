@@ -1,12 +1,12 @@
 MOTU midi express 128 linux driver
 ==================================
 
-| Device           | Ports | Status                         |
-|------------------|-------|--------------------------------|
-| midi express 128 | 8+8   | Working, with kernel panic     |
-| micro lite       | 5+5   | Untested, possibly working     |
-| MIDI Express XT  | 8+8   | Untested, probably not working |
-| micro express    | 5+5   | Untested, probably not working |
+| Device           | Ports | Status          |
+|------------------|-------|-----------------|
+| midi express 128 | 8+8   | Working         |
+| micro lite       | 5+5   | Working         |
+| MIDI Express XT  | 8+8   | MIDI ports only |
+| micro express    | 5+5   | MIDI ports only |
 
 There is currently no replacement for ClockWorks either.
 
