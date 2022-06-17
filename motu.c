@@ -4,6 +4,8 @@
  *   Code based on the Behringer BCD2000 driver
  *
  *   Copyright (C) 2014 vampirefrog (motu-usb@vampi.tech)
+ *   touched 2022 lost-bit (lost-bit@tripod-systems.de)
+ *     support for micro express & micro lite added
  */
 
 #include <linux/kernel.h>
@@ -14,12 +16,20 @@
 #include <linux/bitmap.h>
 #include <linux/usb.h>
 #include <linux/usb/audio.h>
+#include <linux/version.h>
+#include <linux/spinlock.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
 
-#define PREFIX "snd-motu: "
-#define BUFSIZE 32
+#define PREFIX   "snd-motu: "
+#define BUFSIZE  128
+#define NUM_ISO  4
+
+typedef enum
+{
+        express_128,micro_express,micro_lite,express_xt
+} en_motu_devices;
 
 static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x07fd, 0x0001) },
@@ -39,6 +49,20 @@ struct motu_out_port {
 	struct snd_rawmidi_substream *substream;
 };
 
+#define N_MBUF       64
+struct motufifo 
+{
+    unsigned char  mbuf[N_MBUF];
+    unsigned int   p_in,p_out;
+    unsigned char  last_cmd;
+    unsigned int   rd_bytes;
+    unsigned int   missing_bytes;
+    unsigned int   buf_len;
+    unsigned int   buf_send_len;
+    unsigned int   cmd_len;
+    unsigned int   remaining;
+};
+
 struct motu {
 	struct usb_device *dev;
 	struct snd_card *card;
@@ -47,8 +71,8 @@ struct motu {
 
 	int midi_out_active;
 	struct snd_rawmidi *rmidi;
-	struct motu_in_port in_ports[8];
-	struct motu_out_port out_ports[8];
+	struct motu_in_port in_ports[9];
+	struct motu_out_port out_ports[9];
 	unsigned char counter;
 
 	unsigned char midi_in_buf[BUFSIZE];
@@ -58,6 +82,17 @@ struct motu {
 	struct urb *midi_in_urb;
 
 	struct usb_anchor anchor;
+	
+	en_motu_devices motu_type;
+	int n_ports_in;
+	int n_ports_out;
+	int last_out_port;
+	int last_in_port;
+	int in_state;
+	
+	struct motufifo mfifo[9];
+	
+	spinlock_t spinlock;
 };
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
@@ -92,7 +127,7 @@ static int motu_midi_input_close(struct snd_rawmidi_substream *substream)
 static void motu_midi_input_trigger(struct snd_rawmidi_substream *substream, int up) {
 	struct motu *motu = substream->rmidi->private_data;
 
-	if(substream->number >= 8)
+	if(substream->number >= motu->n_ports_in)
 		return;
 
 	motu->in_ports[substream->number].substream = up ? substream : NULL;
@@ -198,7 +233,7 @@ static void motu_in_port_flush(struct motu *motu, int port) {
 	motu->in_ports[port].buf_send_len = 0;
 }
 
-static void motu_midi_handle_input(struct motu *motu, const unsigned char *buf, unsigned int buf_len) {
+static void motu_midi_handle_input_prot1(struct motu *motu, const unsigned char *buf, unsigned int buf_len) {
 	struct snd_rawmidi_substream *midi_receive_substream;
 
 	int i, p;
@@ -252,7 +287,89 @@ static void motu_midi_handle_input(struct motu *motu, const unsigned char *buf, 
 	}
 }
 
-static void motu_midi_send(struct motu *motu)
+static void motu_midi_handle_input_prot2(struct motu *motu, const unsigned char *buf, unsigned int buf_len) {
+   struct snd_rawmidi_substream *midi_receive_substream;
+
+     int  i;
+
+     // ignore 1st byte
+     i = 1;
+
+     while(i < buf_len)
+     {
+        switch(motu->in_state)
+        {
+           case 0 :
+              if(buf[i] == 0xF5)
+                 motu->in_state = 1;
+              break;
+           case 1 : // desired port
+              if(buf[i] != 0xFF)
+              {
+                 motu->last_in_port = buf[i];
+                 motu->in_ports[motu->last_in_port].buf_len = 0;
+                 motu->in_state = 2;
+              }
+              break;
+           case 2 : // data section
+              if(buf[i] != 0xFF)
+              {
+                 if((buf[i] & 0x80) == 0)
+                 {
+                    motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = 
+                       motu->in_ports[motu->last_in_port].last_cmd;
+                 }
+                 else
+                 {
+                    motu->in_ports[motu->last_in_port].last_cmd = buf[i];
+                 }
+                 motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = buf[i];
+                 switch(motu->in_ports[motu->last_in_port].last_cmd)
+                 {
+                    case 0xF5 : 
+                       motu->in_state = 1;
+                       break;
+                    case 0xF0 :
+                       motu->in_state = 4; // special command
+                       break;
+                    default :
+                       if(buf[i] < 0xF0)
+                          motu->in_ports[motu->last_in_port].cmd_bytes_remaining = get_cmd_num_bytes(motu->in_ports[motu->last_in_port].last_cmd);
+                       else
+                          motu->in_ports[motu->last_in_port].cmd_bytes_remaining = 3;
+                       motu->in_state = 3;
+                       break;
+                 }
+              }
+              break;
+           case 3 :
+           case 4 :
+              if(buf[i] != 0xFF)
+              {
+                 motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = buf[i];
+                 if(((motu->in_state == 3) && (motu->in_ports[motu->last_in_port].buf_len == motu->in_ports[motu->last_in_port].cmd_bytes_remaining)) ||
+                    ((motu->in_state == 4) && (buf[i] == 0xF7)))
+                 {
+                    if(motu->in_ports[motu->last_in_port].substream)
+                    {
+                       midi_receive_substream = READ_ONCE(motu->in_ports[motu->last_in_port].substream);
+                       if(midi_receive_substream != 0)
+                       {
+                          snd_rawmidi_receive(midi_receive_substream,motu->in_ports[motu->last_in_port].buf,motu->in_ports[motu->last_in_port].buf_len);
+                       }
+                    }
+                    motu->in_ports[motu->last_in_port].buf_len = 0;
+                    motu->in_state = 2;
+                 }
+              }
+              break;
+        } /* switch */
+        i++;
+     }
+        
+} /* motu_midi_handle_input_prot2 */
+
+static void motu_midi_send_prot1(struct motu *motu)
 {
 	int ret, p, i, mask, bit;
 	struct snd_rawmidi_substream *midi_out_substream;
@@ -263,7 +380,7 @@ static void motu_midi_send(struct motu *motu)
 	motu->midi_out_buf[0] = motu->counter++;
 	motu->midi_out_buf[1] = 0;
 
-	for(p = 0; p < 8; p++) {
+	for(p = 0; p < motu->n_ports_out; p++) {
 		lens[p] = 0;
 
 		midi_out_substream = READ_ONCE(motu->out_ports[p].substream);
@@ -278,7 +395,7 @@ static void motu_midi_send(struct motu *motu)
 
 	for(i = 0; i < 3; i++) {
 		mask = 0;
-		for(p = 0, bit = 1; p < 8; p++, bit <<= 1) {
+		for(p = 0, bit = 1; p < motu->n_ports_out; p++, bit <<= 1) {
 			if(lens[p] > i) mask |= bit;
 		}
 		if(mask == 0) {
@@ -287,7 +404,7 @@ static void motu_midi_send(struct motu *motu)
 		}
 		if(outlen < sizeof(motu->midi_out_buf) / sizeof(motu->midi_out_buf[0]))
 			motu->midi_out_buf[outlen++] = mask;
-		for(p = 0; p < 8; p++) {
+		for(p = 0; p < motu->n_ports_out; p++) {
 			if(lens[p] > i && outlen < sizeof(motu->midi_out_buf) / sizeof(motu->midi_out_buf[0]))
 				motu->midi_out_buf[outlen++] = bufs[p][i];
 		}
@@ -315,6 +432,176 @@ static void motu_midi_send(struct motu *motu)
 		motu->midi_out_active = 1;
 }
 
+static void mfifo_in(struct motu *motu,int port,unsigned char *buf,int len)
+{
+        int  i;
+        
+        for(i=0; i<len; i++)
+        {
+           motu->mfifo[port].mbuf[motu->mfifo[port].p_in] = buf[i];
+           motu->mfifo[port].p_in++;
+           if(motu->mfifo[port].p_in >= N_MBUF)
+              motu->mfifo[port].p_in = 0;
+
+           motu->mfifo[port].buf_len++;
+           if(buf[i] & 0x80) // command
+           {
+              switch(buf[i])
+              {
+                 case 0xF0 : // sysex command
+                    motu->mfifo[port].cmd_len = 0;
+                    break;
+                 case 0xF7 : // end sysex
+                    motu->mfifo[port].cmd_len = 0;
+                    motu->mfifo[port].buf_send_len = motu->mfifo[port].buf_len;
+                    break;
+                 default :
+                    motu->mfifo[port].cmd_len = get_cmd_num_bytes(buf[i]) - 1;
+                    motu->mfifo[port].remaining = motu->mfifo[port].cmd_len;
+                    break;
+	      }
+           }
+           else if(motu->mfifo[port].cmd_len)
+           {
+              if(motu->mfifo[port].remaining == 0)
+                 motu->mfifo[port].remaining = motu->mfifo[port].cmd_len;
+              motu->mfifo[port].remaining--;
+              if(motu->mfifo[port].remaining == 0)
+              {
+                 motu->mfifo[port].buf_send_len = motu->mfifo[port].buf_len;
+              }
+           }
+        }
+
+        return;
+        
+} /* mfifo_in */
+
+static void motu_midi_send_prot2(struct motu *motu)
+{
+	int ret, p, i,j,k;
+	struct snd_rawmidi_substream *midi_out_substream;
+	int lens[9];
+	unsigned char bufs[9][12];
+	uint8_t state;
+	int out_count, out_offset;
+
+	for(p = 0; p < motu->n_ports_out; p++) {
+		lens[p] = 0;
+
+		midi_out_substream = READ_ONCE(motu->out_ports[p].substream);
+		if (!midi_out_substream)
+			continue;
+
+		lens[p] = snd_rawmidi_transmit(midi_out_substream, bufs[p], 3);
+		mfifo_in(motu,p,bufs[p],lens[p]);
+
+		if (lens[p] < 0)
+			dev_err(&motu->dev->dev, "%s: snd_rawmidi_transmit error %d\n", __func__, lens[p]);
+	}
+
+        i = 0;
+        state = 0;
+        k = 0;
+        for(p=0; p<motu->n_ports_out; p++)
+        {
+           while(motu->mfifo[p].buf_send_len)
+           {
+              if(p != motu->last_out_port)
+              {
+                 if(k < 10) // dont split channel-change
+                 {
+                    motu->midi_out_buf[i++] = 0xF5;
+                    motu->midi_out_buf[i++] = p;
+                    k += 2;
+                    motu->last_out_port = p;
+                    if((motu->mfifo[p].mbuf[motu->mfifo[p].p_out] & 0x80) == 0)
+                    {
+                       motu->midi_out_buf[i++] = motu->mfifo[p].last_cmd;
+                       k++;
+                    }
+                 }
+                 else
+                 {
+                    while(k < 12)
+                    {
+                       motu->midi_out_buf[i++] = 0xFF;
+                       k++;
+                    }
+                 }
+              }
+              else
+              {
+                 if(motu->mfifo[p].mbuf[motu->mfifo[p].p_out] & 0x80)
+                    motu->mfifo[p].last_cmd = motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
+                 motu->midi_out_buf[i++] = 
+                     motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
+                 motu->mfifo[p].p_out++;
+                 if(motu->mfifo[p].p_out >= N_MBUF)
+                    motu->mfifo[p].p_out = 0;
+                 motu->mfifo[p].buf_len--;
+                 motu->mfifo[p].buf_send_len--;
+                 k++;
+              }
+              if(k == 12)
+              {
+                 motu->midi_out_buf[i++] = 1;
+                 motu->midi_out_buf[i++] = 0;
+                 k = 0;
+              }
+           }
+        }
+        
+        j = 0;
+        if(i)
+        {
+           if(k)
+           {
+              // fill rest
+              while(k < 12)
+              {
+                 motu->midi_out_buf[i++] = 0xFF;
+                 k++;
+	      }
+              motu->midi_out_buf[i++] = 1;
+              motu->midi_out_buf[i++] = 0;
+           }
+                         
+           out_count = i;
+           out_offset = 0;
+           k = 0;
+           while(out_count > 0)
+           {
+              if(out_count > 14)
+                 j = 14;
+	      else
+	         j = out_count;
+              if(k < NUM_ISO)
+              {
+                 motu->midi_out_urb->iso_frame_desc[k].offset = out_offset;
+	         motu->midi_out_urb->iso_frame_desc[k].length = j;
+                 motu->midi_out_urb->iso_frame_desc[k].status = 0;
+                 k++;
+              }
+              out_offset += j;
+              out_count -= j;                 
+           }
+           motu->midi_out_urb->number_of_packets = k;
+           
+	   motu_dump_buffer(PREFIX "sending to device    : ", motu->midi_out_buf, i);
+
+           /* send packet to the MOTU */
+	   ret = usb_submit_urb(motu->midi_out_urb, GFP_ATOMIC);
+	   if (ret < 0)
+		dev_err(&motu->dev->dev, PREFIX
+			"%s (%p): usb_submit_urb() failed, ret=%d, outlen=%d\n",
+			__func__, midi_out_substream, ret, i);
+	   else
+		motu->midi_out_active = 1;		
+        }
+
+} /* motu_midi_send_prot2 */
+
 static int motu_midi_output_open(struct snd_rawmidi_substream *substream)
 {
 	return 0;
@@ -336,23 +623,46 @@ static int motu_midi_output_close(struct snd_rawmidi_substream *substream)
 static void motu_midi_output_trigger(struct snd_rawmidi_substream *substream,
 						int up)
 {
-	struct motu *motu = substream->rmidi->private_data;
+	struct motu *motu;
+	unsigned long flags;
+	
+	if(substream == NULL)
+	   return;
+	if(substream->rmidi == NULL)
+	   return;
+	if(substream->rmidi->private_data == NULL)
+	   return;
+	   
+	motu = substream->rmidi->private_data;
+        spin_lock_irqsave(&motu->spinlock,flags);
 
 	if (up) {
 		motu->out_ports[substream->number].substream = substream;
 		/* check if there is data userspace wants to send */
 		if (!motu->midi_out_active)
-			motu_midi_send(motu);
+		{
+		   switch(motu->motu_type)
+		   {
+		      case express_128 :
+		      case micro_lite :
+			 motu_midi_send_prot1(motu);
+			 break;
+		      case micro_express :
+		      case express_xt :
+		         motu_midi_send_prot2(motu);
+		         break;
+	           }
+		}
 	} else {
 		motu->out_ports[substream->number].substream = NULL;
 	}
+	spin_unlock_irqrestore(&motu->spinlock,flags);
 }
 
 static void motu_output_complete(struct urb *urb)
 {
-	struct motu *motu = urb->context;
-
-	motu->midi_out_active = 0;
+	struct motu *motu;
+	unsigned long flags;
 
 	if (urb->status)
 		dev_warn(&urb->dev->dev,
@@ -360,9 +670,25 @@ static void motu_output_complete(struct urb *urb)
 
 	if (urb->status == -ESHUTDOWN)
 		return;
+		
+        motu = urb->context;
+        spin_lock_irqsave(&motu->spinlock,flags);
+	motu->midi_out_active = 0;
 
 	/* check if there is more data userspace wants to send */
-	motu_midi_send(motu);
+	switch(motu->motu_type)
+	{
+	   case express_128 : 
+	   case micro_lite :
+	      motu_midi_send_prot1(motu);
+	      break;
+	   case micro_express :
+	   case express_xt :
+	      motu_midi_send_prot2(motu);
+	      break;
+	}
+
+	spin_unlock_irqrestore(&motu->spinlock,flags);
 }
 
 static void motu_input_complete(struct urb *urb)
@@ -378,7 +704,17 @@ static void motu_input_complete(struct urb *urb)
 		return;
 
 	if (urb->actual_length > 0) {
-		motu_midi_handle_input(motu, urb->transfer_buffer, urb->actual_length);
+	    switch(motu->motu_type)
+	    {
+	       case express_128 :
+	       case micro_lite :
+  		  motu_midi_handle_input_prot1(motu, urb->transfer_buffer, urb->actual_length);
+  		  break;
+	       case micro_express :
+	       case express_xt :
+	          motu_midi_handle_input_prot2(motu, urb->transfer_buffer, urb->actual_length);
+	          break;
+            }
 	}
 
 	/* return URB to device */
@@ -430,8 +766,8 @@ static int motu_init_midi(struct motu *motu)
 		motu->card,
 		motu->card->shortname,
 		0,
-		8, /* output */
-		8, /* input */
+		motu->n_ports_out, /* output */
+		motu->n_ports_in, /* input */
 		&rmidi
 	);
 
@@ -454,7 +790,17 @@ static int motu_init_midi(struct motu *motu)
 	usb_set_interface(motu->dev, 1, 2);
 
 	motu->midi_in_urb = usb_alloc_urb(0, GFP_KERNEL);
-	motu->midi_out_urb = usb_alloc_urb(0, GFP_KERNEL);
+	switch(motu->motu_type)
+	{
+	   case express_128 :
+	   case micro_lite :
+	      motu->midi_out_urb = usb_alloc_urb(0, GFP_KERNEL);
+	      break;
+           case micro_express :
+           case express_xt :
+              motu->midi_out_urb = usb_alloc_urb(NUM_ISO, GFP_KERNEL);
+              break;
+        }
 
 	if (!motu->midi_in_urb || !motu->midi_out_urb) {
 		dev_err(&motu->dev->dev, PREFIX "usb_alloc_urb failed\n");
@@ -466,17 +812,37 @@ static int motu_init_midi(struct motu *motu)
 				motu->midi_in_buf, BUFSIZE,
 				motu_input_complete, motu, 1);
 
-	usb_fill_int_urb(motu->midi_out_urb, motu->dev,
+        if((motu->motu_type == express_128) || (motu->motu_type == micro_lite))
+        {
+	   usb_fill_int_urb(motu->midi_out_urb, motu->dev,
 				usb_sndintpipe(motu->dev, 0x02),
 				motu->midi_out_buf, BUFSIZE,
 				motu_output_complete, motu, 1);
-
+	}
+	else if((motu->motu_type == micro_express) || (motu->motu_type == express_xt))
+	{
+           motu->midi_out_urb->dev = motu->dev;
+           motu->midi_out_urb->pipe = usb_sndisocpipe(motu->dev,0x02);
+           motu->midi_out_urb->transfer_flags = URB_ISO_ASAP;
+           motu->midi_out_urb->transfer_buffer = motu->midi_out_buf;
+           motu->midi_out_urb->transfer_buffer_length = BUFSIZE;
+           motu->midi_out_urb->complete = motu_output_complete;
+           motu->midi_out_urb->context = motu;
+           motu->midi_out_urb->start_frame = 0;
+           motu->midi_out_urb->number_of_packets = 1;
+           motu->midi_out_urb->iso_frame_desc[0].offset = 0;
+           motu->midi_out_urb->iso_frame_desc[0].length = BUFSIZE;
+           motu->midi_out_urb->interval = 1;
+        }
+				
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 	/* sanity checks of EPs before actually submitting */
 	if (usb_urb_ep_type_check(motu->midi_in_urb) ||
 	    usb_urb_ep_type_check(motu->midi_out_urb)) {
 		dev_err(&motu->dev->dev, "invalid MIDI EP\n");
 		return -EINVAL;
 	}
+#endif	
 
 	motu_init_device(motu);
 
@@ -506,6 +872,7 @@ static int motu_probe(struct usb_interface *interface,
 	char usb_path[32];
 	int err, i;
 	struct usb_device *usbdev;
+	char str[64];
 
 	mutex_lock(&devices_mutex);
 
@@ -519,11 +886,20 @@ static int motu_probe(struct usb_interface *interface,
 	}
 
 	usbdev = interface_to_usbdev(interface);
-	if(interface->altsetting->desc.bInterfaceNumber != 1 || usbdev->descriptor.bDeviceSubClass != 3) {
+
+	if(usb_string(usbdev,usbdev->descriptor.iProduct,str,sizeof(str)) <= 0)
+        {
+           mutex_unlock(&devices_mutex);
+	   return -ENODEV;
+	}
+
+	if((interface->altsetting->desc.bInterfaceNumber != 1) ||
+	   ((usbdev->descriptor.bDeviceSubClass != 3) &&
+	    (usbdev->descriptor.bDeviceSubClass != 1))) {
 		mutex_unlock(&devices_mutex);
 		return -ENOENT;
 	}
-
+		
 	err = snd_card_new(&interface->dev, index[card_index], id[card_index],
 			THIS_MODULE, sizeof(*motu), &card);
 	if (err < 0) {
@@ -537,8 +913,59 @@ static int motu_probe(struct usb_interface *interface,
 	motu->card_index = card_index;
 	motu->intf = interface;
 
+        // check iProduct doesn't help: micro lite is 2; micro express also
+	switch(usbdev->descriptor.bDeviceSubClass)
+	{
+	   case 1 : // micro express
+	      if(usbdev->actconfig->desc.bConfigurationValue != 1)
+	      {
+   	         usb_driver_set_configuration(usbdev,1);
+   	         return -ENODEV;
+	      }
+	      usb_set_interface(usbdev,0,0);
+	      if(strstr(str,"Micro Express"))
+	      {
+	         motu->motu_type = micro_express;
+	         motu->n_ports_in = 5; // 0 is dead for the moment
+	         motu->n_ports_out = 7; // 0 is all
+	         motu->last_out_port = -1;
+	         motu->last_in_port = -1;
+	         motu->in_state = 0;
+	      }
+	      else
+	      {
+	         motu->motu_type = express_xt;
+	         motu->n_ports_in = 9; // 0 is dead for the moment
+	         motu->n_ports_out = 9; // 0 is all
+	         motu->last_out_port = -1;
+	         motu->last_in_port = -1;
+	         motu->in_state = 0;
+	      }
+	      break;
+	   case 3 : // express 128
+	      if(strstr(str,"micro lite"))
+	      {
+	         motu->motu_type = micro_lite;
+	         motu->n_ports_in = 5;
+	         motu->n_ports_out = 5;
+	      }
+	      else
+	      {
+	         motu->motu_type = express_128;
+	         motu->n_ports_in = 8;
+	         motu->n_ports_out = 8;
+	      }
+	      break;
+	   default :
+              mutex_unlock(&devices_mutex);
+	      return -ENODEV;
+	      break;
+	}
+	
+	spin_lock_init(&motu->spinlock);
+	
 	// Do I need to initialize this to zero? Or is it already zeroed by snd_card_new()?
-	for(i = 0; i < 8; i++) {
+	for(i = 0; i < 9; i++) {
 		motu->in_ports[i].substream = 0;
 		motu->in_ports[i].last_cmd = 0;
 		motu->in_ports[i].cmd_bytes_remaining = 0;
@@ -548,11 +975,11 @@ static int motu_probe(struct usb_interface *interface,
 	snd_card_set_dev(card, &interface->dev);
 
 	strncpy(card->driver, "snd-motu", sizeof(card->driver));
-	strncpy(card->shortname, "express128", sizeof(card->shortname));
-	usb_make_path(motu->dev, usb_path, sizeof(usb_path));
-	snprintf(motu->card->longname, sizeof(motu->card->longname),
-			"MOTU midi express 128 at %s",
-			usb_path);
+        snprintf(card->shortname, sizeof(card->shortname), "MOTU %s", str);
+        usb_make_path(motu->dev, usb_path, sizeof(usb_path));
+        snprintf(motu->card->longname, sizeof(motu->card->longname),
+	         "MOTU midi %s at %s",str,usb_path);
+			
 	err = motu_init_midi(motu);
 	if (err < 0)
 		goto probe_error;
@@ -596,10 +1023,16 @@ static void motu_disconnect(struct usb_interface *interface)
 	mutex_unlock(&devices_mutex);
 }
 
+static int motu_ioctl(struct usb_interface *intf,unsigned int code,void *buf)
+{
+        return(0);
+} /* motu_ioctl */
+
 static struct usb_driver motu_driver = {
 	.name =		"snd-motu",
 	.probe =	motu_probe,
 	.disconnect =	motu_disconnect,
+	.unlocked_ioctl = motu_ioctl,
 	.id_table =	id_table,
 };
 
@@ -607,5 +1040,6 @@ module_usb_driver(motu_driver);
 
 MODULE_DEVICE_TABLE(usb, id_table);
 MODULE_AUTHOR("vampirefrog, motu-usb@vampi.tech");
-MODULE_DESCRIPTION("MOTU midi express 128 driver");
+MODULE_AUTHOR("lost-bit, lost-bit@tripod-systems.de");
+MODULE_DESCRIPTION("MOTU midi express devices driver");
 MODULE_LICENSE("GPL");
