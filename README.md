@@ -32,6 +32,11 @@ sudo depmod
 sudo modprobe motu
 ```
 
+DKMS
+----
+
+There is also a DKMS file for Arch linux.
+
 Protocol:
 ---------
 
