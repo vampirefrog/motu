@@ -774,7 +774,7 @@ static int motu_init_midi(struct motu *motu)
 	if (ret < 0)
 		return ret;
 
-	strlcpy(rmidi->name, motu->card->shortname, sizeof(rmidi->name));
+	strncpy(rmidi->name, motu->card->shortname, sizeof(rmidi->name));
 
 	rmidi->info_flags = SNDRV_RAWMIDI_INFO_DUPLEX;
 	rmidi->private_data = motu;
