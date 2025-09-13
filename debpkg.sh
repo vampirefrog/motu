@@ -33,7 +33,7 @@ cat >${DEBPATH}/DEBIAN/postinst <<EOF
 dkms add -m $PKGNAME -v $VERSION
 dkms build -m $PKGNAME -v $VERSION
 dkms install -m $PKGNAME -v $VERSION
-echo "motu" | /etc/modules-load.d/motu.conf
+echo "motu" > /etc/modules-load.d/motu.conf
 modprobe motu
 EOF
 
