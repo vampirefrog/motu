@@ -11,6 +11,8 @@ DEBPATH=${PKGNAME}_${VERSION}-${SUBVER}
 SRCPATH=/usr/src/${PKGNAME}-${VERSION}
 DEBSRCP=${DEBPATH}${SRCPATH}
 
+rm -rf ${DEBPATH} 2>/dev/null
+
 mkdir -p ${DEBPATH}/DEBIAN 2>/dev/null
 mkdir -p ${DEBSRCP} 2>/dev/null
 
@@ -32,13 +34,13 @@ EOF
 cat >${DEBPATH}/DEBIAN/postinst <<EOF
 dkms add -m $PKGNAME -v $VERSION
 dkms build -m $PKGNAME -v $VERSION
-dkms install -m $PKGNAME -v $VERSION
+dkms install -m $PKGNAME -v $VERSION --force
 echo "motu" > /etc/modules-load.d/motu.conf
-modprobe motu
+/usr/sbin/modprobe motu
 EOF
 
 cat >${DEBPATH}/DEBIAN/prerm <<EOF
-modprobe -r motu
+/usr/sbin/modprobe -r motu
 rm -rf /etc/modules-load.d/motu.conf
 dkms uninstall -m $PKGNAME -v $VERSION
 dkms unbuild -m $PKGNAME -v $VERSION
@@ -49,3 +51,5 @@ chmod 755 ${DEBPATH}/DEBIAN/postinst
 chmod 755 ${DEBPATH}/DEBIAN/prerm
 
 dpkg-deb --build $DEBPATH
+
+rm -rf ${DEBPATH} 2>/dev/null
