@@ -37,6 +37,13 @@ DKMS
 
 There is also a DKMS file for Arch linux.
 
+A script has been added by darkQ to build a debian package with an adapted DKMS file.
+```bash
+./debpkg.sh
+sudo apt install ./motu-*.deb
+```
+
+
 Protocol:
 ---------
 
