@@ -33,9 +33,13 @@ cat >${DEBPATH}/DEBIAN/postinst <<EOF
 dkms add -m $PKGNAME -v $VERSION
 dkms build -m $PKGNAME -v $VERSION
 dkms install -m $PKGNAME -v $VERSION
+echo "motu" | /etc/modules-load.d/motu.conf
+modprobe motu
 EOF
 
 cat >${DEBPATH}/DEBIAN/prerm <<EOF
+modprobe -r motu
+rm -rf /etc/modules-load.d/motu.conf
 dkms uninstall -m $PKGNAME -v $VERSION
 dkms unbuild -m $PKGNAME -v $VERSION
 dkms remove -m $PKGNAME -v $VERSION
