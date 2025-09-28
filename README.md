@@ -39,7 +39,7 @@ DKMS
 
 There is also a DKMS file for Arch linux.
 
-Install on Debian based distro's
+Install on Debian based distros
 --------------------------------
 
 A script has been added by darkQ to build a debian package with an adapted DKMS file.
