@@ -1,0 +1,18 @@
+---
+BasedOnStyle: LLVM
+IndentWidth: 8
+UseTab: Always
+TabWidth: 8
+BreakBeforeBraces: Linux
+AllowShortIfStatementsOnASingleLine: false
+IndentCaseLabels: false
+ColumnLimit: 80
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 1
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+ContinuationIndentWidth: 8
+PointerAlignment: Right
