@@ -14,8 +14,10 @@ Only tested on linux 5.x.
 
 Currently in alpha stage, please submit pull requests or bug reports if you find any.
 
-Build:
-------
+Manual Build and Install :
+--------------------------
+
+*For Debian or Ubuntu based distributions use the debpkg.sh script. Do not use the manual install.
 
 Make sure you have linux headers or linux source.
 
@@ -36,6 +38,16 @@ DKMS
 ----
 
 There is also a DKMS file for Arch linux.
+
+Install on Debian based distros
+--------------------------------
+
+A script has been added by darkQ to build a debian package with an adapted DKMS file.
+```bash
+./debpkg.sh
+sudo apt install ./$(ls motu_*.deb)
+```
+
 
 Protocol:
 ---------

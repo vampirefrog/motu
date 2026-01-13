@@ -7,3 +7,5 @@ modules.order
 *.ko
 *.mod
 *.mod.c
+motu_*
+*.deb
