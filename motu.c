@@ -324,12 +324,24 @@ static void motu_midi_handle_input_prot2(struct motu *motu, const unsigned char 
               {
                  if((buf[i] & 0x80) == 0)
                  {
-                    motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = 
+                    // Check buffer space before writing
+                    if(motu->in_ports[motu->last_in_port].buf_len >= sizeof(motu->in_ports[motu->last_in_port].buf)) {
+                       dev_warn(&motu->dev->dev, PREFIX "input buffer overflow on port %d, dropping data\n", motu->last_in_port);
+                       motu->in_state = 0;
+                       break;
+                    }
+                    motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] =
                        motu->in_ports[motu->last_in_port].last_cmd;
                  }
                  else
                  {
                     motu->in_ports[motu->last_in_port].last_cmd = buf[i];
+                 }
+                 // Check buffer space before writing
+                 if(motu->in_ports[motu->last_in_port].buf_len >= sizeof(motu->in_ports[motu->last_in_port].buf)) {
+                    dev_warn(&motu->dev->dev, PREFIX "input buffer overflow on port %d, dropping data\n", motu->last_in_port);
+                    motu->in_state = 0;
+                    break;
                  }
                  motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = buf[i];
                  switch(motu->in_ports[motu->last_in_port].last_cmd)
@@ -354,6 +366,12 @@ static void motu_midi_handle_input_prot2(struct motu *motu, const unsigned char 
            case 4 :
               if(buf[i] != 0xFF)
               {
+                 // Check buffer space before writing
+                 if(motu->in_ports[motu->last_in_port].buf_len >= sizeof(motu->in_ports[motu->last_in_port].buf)) {
+                    dev_warn(&motu->dev->dev, PREFIX "input buffer overflow on port %d, dropping data\n", motu->last_in_port);
+                    motu->in_state = 0;
+                    break;
+                 }
                  motu->in_ports[motu->last_in_port].buf[motu->in_ports[motu->last_in_port].buf_len++] = buf[i];
                  if(((motu->in_state == 3) && (motu->in_ports[motu->last_in_port].buf_len == motu->in_ports[motu->last_in_port].cmd_bytes_remaining)) ||
                     ((motu->in_state == 4) && (buf[i] == 0xF7)))
@@ -443,9 +461,15 @@ static void motu_midi_send_prot1(struct motu *motu)
 static void mfifo_in(struct motu *motu,int port,unsigned char *buf,int len)
 {
         int  i;
-        
+
         for(i=0; i<len; i++)
         {
+           // Check if FIFO is full
+           if(motu->mfifo[port].buf_len >= N_MBUF) {
+              dev_warn(&motu->dev->dev, PREFIX "FIFO overflow on port %d, dropping data\n", port);
+              return;
+           }
+
            motu->mfifo[port].mbuf[motu->mfifo[port].p_in] = buf[i];
            motu->mfifo[port].p_in++;
            if(motu->mfifo[port].p_in >= N_MBUF)
@@ -519,6 +543,10 @@ static void motu_midi_send_prot2(struct motu *motu)
               {
                  if(k < 10) // dont split channel-change
                  {
+                    if(i + 3 >= BUFSIZE) {
+                       dev_warn(&motu->dev->dev, PREFIX "output buffer full, stopping\n");
+                       goto send_buffer;
+                    }
                     motu->midi_out_buf[i++] = 0xF5;
                     motu->midi_out_buf[i++] = p;
                     k += 2;
@@ -533,6 +561,10 @@ static void motu_midi_send_prot2(struct motu *motu)
                  {
                     while(k < 12)
                     {
+                       if(i >= BUFSIZE) {
+                          dev_warn(&motu->dev->dev, PREFIX "output buffer full, stopping\n");
+                          goto send_buffer;
+                       }
                        motu->midi_out_buf[i++] = 0xFF;
                        k++;
                     }
@@ -540,9 +572,13 @@ static void motu_midi_send_prot2(struct motu *motu)
               }
               else
               {
+                 if(i >= BUFSIZE) {
+                    dev_warn(&motu->dev->dev, PREFIX "output buffer full, stopping\n");
+                    goto send_buffer;
+                 }
                  if(motu->mfifo[p].mbuf[motu->mfifo[p].p_out] & 0x80)
                     motu->mfifo[p].last_cmd = motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
-                 motu->midi_out_buf[i++] = 
+                 motu->midi_out_buf[i++] =
                      motu->mfifo[p].mbuf[motu->mfifo[p].p_out];
                  motu->mfifo[p].p_out++;
                  if(motu->mfifo[p].p_out >= N_MBUF)
@@ -553,26 +589,33 @@ static void motu_midi_send_prot2(struct motu *motu)
               }
               if(k == 12)
               {
+                 if(i + 2 >= BUFSIZE) {
+                    dev_warn(&motu->dev->dev, PREFIX "output buffer full, stopping\n");
+                    goto send_buffer;
+                 }
                  motu->midi_out_buf[i++] = 1;
                  motu->midi_out_buf[i++] = 0;
                  k = 0;
               }
            }
         }
-        
+
+send_buffer:
         j = 0;
         if(i)
         {
            if(k)
            {
               // fill rest
-              while(k < 12)
+              while(k < 12 && i < BUFSIZE)
               {
                  motu->midi_out_buf[i++] = 0xFF;
                  k++;
 	      }
-              motu->midi_out_buf[i++] = 1;
-              motu->midi_out_buf[i++] = 0;
+              if(i + 2 <= BUFSIZE) {
+                 motu->midi_out_buf[i++] = 1;
+                 motu->midi_out_buf[i++] = 0;
+              }
            }
                          
            out_count = i;
@@ -678,8 +721,11 @@ static void motu_output_complete(struct urb *urb)
 
 	if (urb->status == -ESHUTDOWN)
 		return;
-		
+
         motu = urb->context;
+        if (!motu)
+		return;
+
         spin_lock_irqsave(&motu->spinlock,flags);
 	motu->midi_out_active = 0;
 
