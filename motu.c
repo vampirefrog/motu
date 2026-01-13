@@ -1153,6 +1153,51 @@ static void motu_disconnect(struct usb_interface *interface)
 	mutex_unlock(&devices_mutex);
 }
 
+static int motu_suspend(struct usb_interface *intf, pm_message_t message)
+{
+	struct motu *motu = usb_get_intfdata(intf);
+
+	if (!motu)
+		return 0;
+
+	dev_info(&motu->dev->dev, PREFIX "suspending\n");
+
+	/* Stop the power management for the sound card */
+	snd_power_change_state(motu->card, SNDRV_CTL_POWER_D3hot);
+
+	/* Kill all active URBs */
+	usb_kill_urb(motu->midi_out_urb);
+	usb_kill_urb(motu->midi_in_urb);
+
+	return 0;
+}
+
+static int motu_resume(struct usb_interface *intf)
+{
+	struct motu *motu = usb_get_intfdata(intf);
+	int ret;
+
+	if (!motu)
+		return 0;
+
+	dev_info(&motu->dev->dev, PREFIX "resuming\n");
+
+	/* Restart input URB to receive MIDI data */
+	ret = usb_submit_urb(motu->midi_in_urb, GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(&motu->dev->dev,
+			PREFIX "%s: usb_submit_urb() failed on resume, ret=%d\n",
+			__func__, ret);
+		snd_power_change_state(motu->card, SNDRV_CTL_POWER_D0);
+		return ret;
+	}
+
+	/* Resume the power management for the sound card */
+	snd_power_change_state(motu->card, SNDRV_CTL_POWER_D0);
+
+	return 0;
+}
+
 static int motu_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 {
 	return (0);
@@ -1162,6 +1207,9 @@ static struct usb_driver motu_driver = {
 	.name = "snd-motu",
 	.probe = motu_probe,
 	.disconnect = motu_disconnect,
+	.suspend = motu_suspend,
+	.resume = motu_resume,
+	.reset_resume = motu_resume,
 	.unlocked_ioctl = motu_ioctl,
 	.id_table = id_table,
 };
