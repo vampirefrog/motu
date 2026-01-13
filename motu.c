@@ -306,6 +306,14 @@ static void motu_midi_handle_input_prot2(struct motu *motu, const unsigned char 
            case 1 : // desired port
               if(buf[i] != 0xFF)
               {
+                 // Validate port number to prevent buffer overflow
+                 if(buf[i] >= motu->n_ports_in) {
+                    dev_warn(&motu->dev->dev, PREFIX
+                       "invalid port number %d (max %d), resetting input state\n",
+                       buf[i], motu->n_ports_in - 1);
+                    motu->in_state = 0;
+                    break;
+                 }
                  motu->last_in_port = buf[i];
                  motu->in_ports[motu->last_in_port].buf_len = 0;
                  motu->in_state = 2;
